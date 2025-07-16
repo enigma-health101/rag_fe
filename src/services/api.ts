@@ -1,3 +1,4 @@
+
 import axios, { AxiosResponse, AxiosError } from 'axios';
 import {
   Document,
@@ -145,10 +146,15 @@ interface ModelConfig {
   context_length?: number;
 }
 
+
+
+
 // Create axios instance with default config
 const api = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:5005/api',
-  timeout: 120000, // 2 minutes for complex processing
+  // Ensure HTTPS is always used
+  //baseURL: process.env.NEXT_PUBLIC_API_URL || 'https://rag-api.enigmahealth.io/api',
+  baseURL:  'https://rag-api.enigmahealth.io/api',
+  timeout: 120000,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -412,8 +418,11 @@ export const documentApi = {
 
 
 export const topicsApi = {
-  // Get topics with pagination - matches backend `/topics/` endpoint
+  // Updated to use /topics/list endpoint
   async getTopics(page: number = 1, limit: number = 20, category?: string): Promise<AxiosResponse<ApiResponse<any>>> {
+    console.log('🎯 Using /topics/list endpoint');
+    console.log('- Called with params:', { page, limit, category });
+    
     const params: any = {
       page,
       limit
@@ -423,9 +432,18 @@ export const topicsApi = {
       params.category = category;
     }
 
-    return api.get('/topics', { params });
+    console.log('🚀 Making request to /topics/list with params:', params);
+    
+    try {
+      // Changed from '/topics' to '/topics/list'
+      const response = await api.get('/topics/list', { params });
+      console.log('✅ /topics/list SUCCESS:', response.status);
+      return response;
+    } catch (error) {
+      console.error('❌ /topics/list FAILED:', error);
+      throw error;
+    }
   },
-
   // Get topic categories - matches backend `/topics/categories` endpoint
   async getTopicCategories(): Promise<AxiosResponse<ApiResponse<any>>> {
     return api.get('/topics/categories');

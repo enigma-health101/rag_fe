@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Search, 
@@ -102,12 +102,68 @@ const TopicManager: React.FC = () => {
     pages: 0
   });
 
+  // Add abort controllers for request cancellation
+  const abortControllersRef = useRef<{[key: string]: AbortController}>({});
+  const isInitializingRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  // Cleanup function to cancel all ongoing requests
+  const cancelAllRequests = useCallback(() => {
+    Object.values(abortControllersRef.current).forEach(controller => {
+      if (controller) {
+        controller.abort();
+      }
+    });
+    abortControllersRef.current = {};
+  }, []);
+
+  // Create or get abort controller for a specific operation
+  const getAbortController = useCallback((operation: string) => {
+    // Cancel existing controller for this operation
+    if (abortControllersRef.current[operation]) {
+      abortControllersRef.current[operation].abort();
+    }
+    
+    // Create new controller
+    const controller = new AbortController();
+    abortControllersRef.current[operation] = controller;
+    return controller;
+  }, []);
+
+  // Cleanup on unmount
   useEffect(() => {
-    initializeData();
+    mountedRef.current = true;
+    
+    return () => {
+      mountedRef.current = false;
+      cancelAllRequests();
+    };
+  }, [cancelAllRequests]);
+
+  // Debounced effect for pagination and category changes
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      if (mountedRef.current && !isInitializingRef.current) {
+        console.log('🔄 useEffect triggered:', { 
+          page: pagination.page, 
+          category: selectedCategory,
+          isInitializing: isInitializingRef.current 
+        });
+        initializeData();
+      }
+    }, 100); // Small delay to prevent rapid re-renders
+
+    return () => clearTimeout(timeoutId);
   }, [pagination.page, selectedCategory]);
 
   const initializeData = async () => {
+    if (isInitializingRef.current) {
+      console.log('⏸️ Already initializing, skipping...');
+      return;
+    }
+    
     console.log('🚀 Initializing Topic Manager data...');
+    isInitializingRef.current = true;
     setLoading(true);
     setErrors({});
 
@@ -120,22 +176,37 @@ const TopicManager: React.FC = () => {
       ]);
     } catch (error) {
       console.error('❌ Failed to initialize data:', error);
-      setErrors(prev => ({ ...prev, initialization: 'Failed to load initial data' }));
+      if (mountedRef.current) {
+        setErrors(prev => ({ ...prev, initialization: 'Failed to load initial data' }));
+      }
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
+      isInitializingRef.current = false;
     }
   };
 
   const loadTopics = async () => {
+    if (!mountedRef.current) return;
+    
     try {
       console.log('📋 Loading topics...', { page: pagination.page, limit: pagination.limit, category: selectedCategory });
       
+      const abortController = getAbortController('topics');
       setLoadingStates(prev => ({ ...prev, topics: true }));
+      
       const response = await topicsApi.getTopics(
         pagination.page, 
         pagination.limit, 
         selectedCategory === 'all' ? undefined : selectedCategory
       );
+      
+      // Check if component is still mounted and this request wasn't cancelled
+      if (!mountedRef.current || abortController.signal.aborted) {
+        console.log('📋 Topics request cancelled or component unmounted');
+        return;
+      }
       
       console.log('✅ Topics response:', response.data);
       
@@ -166,20 +237,41 @@ const TopicManager: React.FC = () => {
         throw new Error(response.data.error || 'Invalid response format');
       }
     } catch (error: any) {
+      // Don't log error if request was aborted
+      if (error.name === 'AbortError' || error.code === 'ERR_CANCELED') {
+        console.log('📋 Topics request was cancelled');
+        return;
+      }
+      
+      if (!mountedRef.current) return;
+      
       console.error('❌ Error loading topics:', error);
       setErrors(prev => ({ ...prev, topics: error.response?.data?.message || error.message || 'Failed to load topics' }));
       toast.error('Failed to load topics');
     } finally {
-      setLoadingStates(prev => ({ ...prev, topics: false }));
+      if (mountedRef.current) {
+        setLoadingStates(prev => ({ ...prev, topics: false }));
+      }
+      // Clean up abort controller
+      delete abortControllersRef.current['topics'];
     }
   };
 
   const loadCategories = async () => {
+    if (!mountedRef.current) return;
+    
     try {
       console.log('🏷️ Loading categories...');
+      const abortController = getAbortController('categories');
       setLoadingStates(prev => ({ ...prev, categories: true }));
       
       const response = await topicsApi.getTopicCategories();
+      
+      if (!mountedRef.current || abortController.signal.aborted) {
+        console.log('🏷️ Categories request cancelled or component unmounted');
+        return;
+      }
+      
       console.log('✅ Categories response:', response.data);
       
       // Handle backend response format: { success: true, data: { categories: [...], total_categories: number } }
@@ -200,21 +292,40 @@ const TopicManager: React.FC = () => {
         throw new Error(response.data.error || 'Invalid response format');
       }
     } catch (error: any) {
+      if (error.name === 'AbortError' || error.code === 'ERR_CANCELED') {
+        console.log('🏷️ Categories request was cancelled');
+        return;
+      }
+      
+      if (!mountedRef.current) return;
+      
       console.error('❌ Error loading categories:', error);
       setErrors(prev => ({ ...prev, categories: error.response?.data?.message || error.message || 'Failed to load categories' }));
       // Set a default category to prevent issues
       setCategories(['all', 'content_based']);
     } finally {
-      setLoadingStates(prev => ({ ...prev, categories: false }));
+      if (mountedRef.current) {
+        setLoadingStates(prev => ({ ...prev, categories: false }));
+      }
+      delete abortControllersRef.current['categories'];
     }
   };
 
   const loadStatistics = async () => {
+    if (!mountedRef.current) return;
+    
     try {
       console.log('📊 Loading statistics...');
+      const abortController = getAbortController('statistics');
       setLoadingStates(prev => ({ ...prev, statistics: true }));
       
       const response = await topicsApi.getTopicStatistics();
+      
+      if (!mountedRef.current || abortController.signal.aborted) {
+        console.log('📊 Statistics request cancelled or component unmounted');
+        return;
+      }
+      
       console.log('✅ Statistics response:', response.data);
       
       // Handle backend response format: { success: true, data: { overall_statistics: {...}, category_distribution: [...] } }
@@ -245,6 +356,13 @@ const TopicManager: React.FC = () => {
         throw new Error(response.data.error || 'Invalid response format');
       }
     } catch (error: any) {
+      if (error.name === 'AbortError' || error.code === 'ERR_CANCELED') {
+        console.log('📊 Statistics request was cancelled');
+        return;
+      }
+      
+      if (!mountedRef.current) return;
+      
       console.error('❌ Error loading statistics:', error);
       setErrors(prev => ({ ...prev, statistics: error.response?.data?.message || error.message || 'Failed to load statistics' }));
       
@@ -258,99 +376,121 @@ const TopicManager: React.FC = () => {
         high_quality_topics: 0
       });
     } finally {
-      setLoadingStates(prev => ({ ...prev, statistics: false }));
+      if (mountedRef.current) {
+        setLoadingStates(prev => ({ ...prev, statistics: false }));
+      }
+      delete abortControllersRef.current['statistics'];
     }
   };
 
   const loadQualityMetrics = async () => {
-  try {
-    console.log('🎯 Loading quality metrics...');
-    setLoadingStates(prev => ({ ...prev, qualityMetrics: true }));
+    if (!mountedRef.current) return;
     
-    const response = await topicsApi.getQualityMetrics();
-    console.log('✅ Quality metrics response:', response.data);
-    
-    // Handle backend response format: { success: true, data: { total_topics: number, quality_issues: {...} } }
-    if (response.data.success && response.data.data) {
-      const metricsData = response.data.data;
+    try {
+      console.log('🎯 Loading quality metrics...');
+      const abortController = getAbortController('qualityMetrics');
+      setLoadingStates(prev => ({ ...prev, qualityMetrics: true }));
       
-      // Safe parsing of metrics data with fallbacks
-      const totalTopics = Number(metricsData.total_topics) || 0;
-      const lowContentTopics = Number(metricsData.quality_issues?.low_content_topics?.count) || 0;
-      const avgContentPerTopic = Number(metricsData.average_content_per_topic) || 0;
-      const avgKeywordsPerTopic = Number(metricsData.avg_keywords_per_topic) || 0;
-      const similarNamePairs = Number(metricsData.quality_issues?.similar_name_pairs?.count) || 0;
+      const response = await topicsApi.getQualityMetrics();
       
-      // Simple quality score calculation (0-100) with safe math
-      let qualityScore = 0;
-      if (totalTopics > 0) {
-        try {
-          const contentScore = Math.min(avgContentPerTopic * 10, 50); // Max 50 points for content
-          const distributionScore = Math.max(0, 50 - (lowContentTopics / totalTopics) * 50); // Max 50 points for distribution
-          qualityScore = Math.round(contentScore + distributionScore);
-          
-          // Ensure quality score is within bounds
-          qualityScore = Math.max(0, Math.min(100, qualityScore));
-        } catch (mathError) {
-          console.warn('Error calculating quality score, using default:', mathError);
-          qualityScore = 0;
-        }
+      if (!mountedRef.current || abortController.signal.aborted) {
+        console.log('🎯 Quality metrics request cancelled or component unmounted');
+        return;
       }
       
-      // Create metrics object with type safety
-      const metrics: QualityMetrics = {
-        overall_quality_score: qualityScore,
-        topics_without_content: lowContentTopics,
-        avg_keywords_per_topic: avgKeywordsPerTopic,
-        topics_needing_review: similarNamePairs
-      };
+      console.log('✅ Quality metrics response:', response.data);
       
-      console.log('✅ Quality metrics processed:', {
-        totalTopics,
-        lowContentTopics,
-        avgContentPerTopic,
-        qualityScore,
-        metrics
+      // Handle backend response format: { success: true, data: { total_topics: number, quality_issues: {...} } }
+      if (response.data.success && response.data.data) {
+        const metricsData = response.data.data;
+        
+        // Safe parsing of metrics data with fallbacks
+        const totalTopics = Number(metricsData.total_topics) || 0;
+        const lowContentTopics = Number(metricsData.quality_issues?.low_content_topics?.count) || 0;
+        const avgContentPerTopic = Number(metricsData.average_content_per_topic) || 0;
+        const avgKeywordsPerTopic = Number(metricsData.avg_keywords_per_topic) || 0;
+        const similarNamePairs = Number(metricsData.quality_issues?.similar_name_pairs?.count) || 0;
+        
+        // Simple quality score calculation (0-100) with safe math
+        let qualityScore = 0;
+        if (totalTopics > 0) {
+          try {
+            const contentScore = Math.min(avgContentPerTopic * 10, 50); // Max 50 points for content
+            const distributionScore = Math.max(0, 50 - (lowContentTopics / totalTopics) * 50); // Max 50 points for distribution
+            qualityScore = Math.round(contentScore + distributionScore);
+            
+            // Ensure quality score is within bounds
+            qualityScore = Math.max(0, Math.min(100, qualityScore));
+          } catch (mathError) {
+            console.warn('Error calculating quality score, using default:', mathError);
+            qualityScore = 0;
+          }
+        }
+        
+        // Create metrics object with type safety
+        const metrics: QualityMetrics = {
+          overall_quality_score: qualityScore,
+          topics_without_content: lowContentTopics,
+          avg_keywords_per_topic: avgKeywordsPerTopic,
+          topics_needing_review: similarNamePairs
+        };
+        
+        console.log('✅ Quality metrics processed:', {
+          totalTopics,
+          lowContentTopics,
+          avgContentPerTopic,
+          qualityScore,
+          metrics
+        });
+        
+        setQualityMetrics(metrics);
+        
+        // Clear any previous errors
+        setErrors(prev => {
+          const newErrors = { ...prev };
+          delete newErrors.qualityMetrics;
+          return newErrors;
+        });
+      } else {
+        throw new Error(response.data.error || response.data.message || 'Invalid response format');
+      }
+    } catch (error: any) {
+      if (error.name === 'AbortError' || error.code === 'ERR_CANCELED') {
+        console.log('🎯 Quality metrics request was cancelled');
+        return;
+      }
+      
+      if (!mountedRef.current) return;
+      
+      console.error('❌ Error loading quality metrics:', error);
+      
+      // More detailed error logging
+      if (error.response) {
+        console.error('Response data:', error.response.data);
+        console.error('Response status:', error.response.status);
+      }
+      
+      const errorMessage = error.response?.data?.message || 
+                          error.response?.data?.error || 
+                          error.message || 
+                          'Failed to load quality metrics';
+      
+      setErrors(prev => ({ ...prev, qualityMetrics: errorMessage }));
+      
+      // Set safe default quality metrics to prevent UI crashes
+      setQualityMetrics({
+        overall_quality_score: 0,
+        topics_without_content: 0,
+        avg_keywords_per_topic: 0,
+        topics_needing_review: 0
       });
-      
-      setQualityMetrics(metrics);
-      
-      // Clear any previous errors
-      setErrors(prev => {
-        const newErrors = { ...prev };
-        delete newErrors.qualityMetrics;
-        return newErrors;
-      });
-    } else {
-      throw new Error(response.data.error || response.data.message || 'Invalid response format');
+    } finally {
+      if (mountedRef.current) {
+        setLoadingStates(prev => ({ ...prev, qualityMetrics: false }));
+      }
+      delete abortControllersRef.current['qualityMetrics'];
     }
-  } catch (error: any) {
-    console.error('❌ Error loading quality metrics:', error);
-    
-    // More detailed error logging
-    if (error.response) {
-      console.error('Response data:', error.response.data);
-      console.error('Response status:', error.response.status);
-    }
-    
-    const errorMessage = error.response?.data?.message || 
-                        error.response?.data?.error || 
-                        error.message || 
-                        'Failed to load quality metrics';
-    
-    setErrors(prev => ({ ...prev, qualityMetrics: errorMessage }));
-    
-    // Set safe default quality metrics to prevent UI crashes
-    setQualityMetrics({
-      overall_quality_score: 0,
-      topics_without_content: 0,
-      avg_keywords_per_topic: 0,
-      topics_needing_review: 0
-    });
-  } finally {
-    setLoadingStates(prev => ({ ...prev, qualityMetrics: false }));
-  }
-};
+  };
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) {
@@ -359,8 +499,15 @@ const TopicManager: React.FC = () => {
     }
 
     try {
+      const abortController = getAbortController('search');
       setLoading(true);
+      
       const response = await topicsApi.searchTopics(searchQuery, pagination.limit);
+      
+      if (!mountedRef.current || abortController.signal.aborted) {
+        console.log('🔍 Search request cancelled or component unmounted');
+        return;
+      }
       
       // Handle backend response format: { success: true, data: { query: string, topics: [...], total_results: number } }
       if (response.data.success && response.data.data) {
@@ -377,12 +524,52 @@ const TopicManager: React.FC = () => {
         throw new Error(response.data.error || 'Search failed');
       }
     } catch (error: any) {
+      if (error.name === 'AbortError' || error.code === 'ERR_CANCELED') {
+        console.log('🔍 Search request was cancelled');
+        return;
+      }
+      
+      if (!mountedRef.current) return;
+      
       toast.error(error.response?.data?.message || error.message || 'Search failed');
       console.error('Search error:', error);
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
+      delete abortControllersRef.current['search'];
     }
   };
+
+  // Stable pagination handlers
+  const handlePageChange = useCallback((newPage: number) => {
+    console.log('📄 Page change requested:', { from: pagination.page, to: newPage });
+    setPagination(prev => {
+      if (prev.page === newPage) {
+        console.log('📄 Page already set, skipping...');
+        return prev;
+      }
+      return { ...prev, page: newPage };
+    });
+  }, [pagination.page]);
+
+  const handleCategoryChange = useCallback((newCategory: string) => {
+    console.log('🏷️ Category change requested:', { from: selectedCategory, to: newCategory });
+    if (selectedCategory === newCategory) {
+      console.log('🏷️ Category already set, skipping...');
+      return;
+    }
+    setSelectedCategory(newCategory);
+    // Reset page when category changes
+    setPagination(prev => ({ ...prev, page: 1 }));
+  }, [selectedCategory]);
+
+  // Manual refresh handler
+  const handleRefresh = useCallback(() => {
+    console.log('🔄 Manual refresh triggered');
+    cancelAllRequests();
+    initializeData();
+  }, [cancelAllRequests]);
 
   // Update the getCategoryColor function to handle undefined category
   const getCategoryColor = (category?: string) => {
@@ -578,8 +765,8 @@ const TopicManager: React.FC = () => {
         <div className="flex items-center gap-2">
           <Button 
             variant="outline" 
-            onClick={initializeData}
-            disabled={loading}
+            onClick={handleRefresh}
+            disabled={loading || isInitializingRef.current}
           >
             <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
             Refresh All
@@ -729,7 +916,7 @@ const TopicManager: React.FC = () => {
             </div>
             <select
               value={selectedCategory}
-              onChange={(e) => setSelectedCategory(e.target.value)}
+              onChange={(e) => handleCategoryChange(e.target.value)}
               className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             >
               {categories.map(category => (
@@ -738,7 +925,12 @@ const TopicManager: React.FC = () => {
                 </option>
               ))}
             </select>
-            <Button onClick={handleSearch}>
+            <Button onClick={handleSearch} disabled={loadingStates.topics}>
+              {loadingStates.topics ? (
+                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+              ) : (
+                <Search className="w-4 h-4 mr-2" />
+              )}
               Search
             </Button>
           </div>
@@ -762,8 +954,8 @@ const TopicManager: React.FC = () => {
               <Button
                 variant="outline"
                 size="sm"
-                disabled={pagination.page === 1}
-                onClick={() => setPagination(prev => ({ ...prev, page: prev.page - 1 }))}
+                disabled={pagination.page === 1 || loadingStates.topics}
+                onClick={() => handlePageChange(pagination.page - 1)}
               >
                 Previous
               </Button>
@@ -775,8 +967,8 @@ const TopicManager: React.FC = () => {
               <Button
                 variant="outline"
                 size="sm"
-                disabled={pagination.page === pagination.pages}
-                onClick={() => setPagination(prev => ({ ...prev, page: prev.page + 1 }))}
+                disabled={pagination.page === pagination.pages || loadingStates.topics}
+                onClick={() => handlePageChange(pagination.page + 1)}
               >
                 Next
               </Button>
